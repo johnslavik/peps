@@ -134,6 +134,48 @@ unordered inputs or representations containing object addresses.
 Doctests supporting earlier Python versions still need the existing
 workarounds.
 
+Standard-library use
+--------------------
+
+CPython's standard library already uses dictionaries with unused values
+to combine uniqueness, membership testing, and predictable traversal:
+
+* ``enum.EnumDict`` tracks member names in an auxiliary dictionary,
+  storing each name with the value ``None``. Its source explicitly
+  identifies fast lookup and insertion order as the reasons for choosing
+  a dictionary over a list. The collection detects reused names and
+  retains their definition order for enumeration construction. The enum
+  values themselves are stored separately in the namespace mapping.
+  [#stdlib-enum]_
+
+* ``collections.ChainMap.__iter__`` builds an auxiliary dictionary from
+  the keys of its constituent mappings using ``dict.fromkeys``. It merges
+  these dictionaries from last to first, then iterates over the resulting
+  keys. The placeholder values are unused; the dictionary deduplicates
+  keys while implementing ``ChainMap``'s documented iteration order.
+  This order is distinct from the first-to-last search used for value
+  lookup. [#stdlib-chainmap]_
+
+* ``zipfile.Path`` uses a helper defined as ``_dedupe = dict.fromkeys``
+  to collect implied directories. Several archive members can imply the
+  same parent directory; the helper emits it once while preserving the
+  encounter order of the inferred directory names. Both the helper's
+  documentation and the examples for implied directories specify this
+  ordered behavior. [#stdlib-zipfile]_
+
+* ``importlib.resources`` uses ``OrderedDict.fromkeys`` to remove duplicate
+  roots when constructing a ``MultiplexedPath`` for resources spread
+  across multiple locations. Preserving root order matters when locations
+  provide the same resource filename: the merged view selects the first
+  occurrence. The ordered dictionary carries no resource values; it
+  retains the precedence of the supplied roots. [#stdlib-resources]_
+
+These are uses of ordered uniqueness within the standard library itself.
+They show a need to retain order even when there is no associated value
+to store. This PEP would provide that combination in the set interface;
+replacing individual helpers would still require checking their contracts
+and performance.
+
 Existing applications
 ---------------------
 
@@ -511,6 +553,25 @@ References
 .. [#doctest] Python documentation, ``doctest`` warnings about set output
    and suggested workarounds.
    https://docs.python.org/3/library/doctest.html#warnings
+
+.. [#stdlib-enum] CPython, ``EnumDict`` member-name tracking.
+   https://github.com/python/cpython/blob/f5bd07700ecd0f02cc424666b871f51de03b9232/Lib/enum.py#L337-L346
+   https://github.com/python/cpython/blob/f5bd07700ecd0f02cc424666b871f51de03b9232/Lib/enum.py#L449-L456
+
+.. [#stdlib-chainmap] CPython, ``ChainMap`` key iteration and its
+   documented ordering.
+   https://github.com/python/cpython/blob/f5bd07700ecd0f02cc424666b871f51de03b9232/Lib/collections/__init__.py#L1078-L1082
+   https://github.com/python/cpython/blob/f5bd07700ecd0f02cc424666b871f51de03b9232/Doc/library/collections.rst#L99-L113
+
+.. [#stdlib-zipfile] CPython, ordered deduplication of implied directories.
+   https://github.com/python/cpython/blob/f5bd07700ecd0f02cc424666b871f51de03b9232/Lib/zipfile/_path/__init__.py#L72-L73
+   https://github.com/python/cpython/blob/f5bd07700ecd0f02cc424666b871f51de03b9232/Lib/zipfile/_path/__init__.py#L101-L120
+
+.. [#stdlib-resources] CPython, resource-root deduplication and resolution
+   in ``MultiplexedPath``.
+   https://github.com/python/cpython/blob/f5bd07700ecd0f02cc424666b871f51de03b9232/Lib/importlib/resources/readers.py#L17-L18
+   https://github.com/python/cpython/blob/f5bd07700ecd0f02cc424666b871f51de03b9232/Lib/importlib/resources/readers.py#L63-L84
+   https://github.com/python/cpython/blob/f5bd07700ecd0f02cc424666b871f51de03b9232/Lib/importlib/resources/readers.py#L98-L127
 
 .. [#anndata] AnnData, ordered keys in merge operations.
    https://github.com/scverse/anndata/blob/1ec7ba8a9e44ee1eb9fe6756e01ee542666272f8/src/anndata/_core/merge.py#L61-L100
