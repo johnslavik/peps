@@ -23,9 +23,10 @@ Motivation
 ==========
 
 Programs use sets to express uniqueness and set algebra, but often also
-need predictable traversal. Examples include processing configuration
-entries in input order, comparing diagnostic output between runs, and
-generating code reproducibly.
+need predictable traversal. A collection can have order-independent
+membership while retaining the order in which its elements were supplied.
+This combination is useful whenever duplicate removal is an intermediate
+step in an otherwise ordered computation.
 
 A dependency collection illustrates the requirement: repeated names
 should collapse, while processing follows their first appearance::
@@ -34,18 +35,104 @@ should collapse, while processing follows their first appearance::
     list(names)
     # ['parser', 'runtime', 'tests']
 
-Today, ``dict.fromkeys`` preserves this order but exposes a mapping
-interface for elements without associated values. Sorting imposes a
-different order and requires comparable elements or a suitable key.
-Guaranteeing insertion order lets programs retain encounter order while
-using the set interface.
+The order in this example comes from the input. Sorting the names would
+replace that order with a different one. Using a list would preserve it
+but require separate duplicate detection. ``dict.fromkeys`` implements
+ordered deduplication, but represents each element as a key with an unused
+value and provides a mapping interface.
 
-Reported applications include `reproducible scientific workloads
-<https://discuss.python.org/t/add-orderedset-to-stdlib/12730/46>`__,
-`content-addressed JSON round trips
-<https://discuss.python.org/t/add-orderedset-to-stdlib/12730/42>`__,
-and `code generation affected by nondeterministic set traversal
-<https://discuss.python.org/t/implement-as-an-empty-set-literal/101197/56>`__.
+The need is supported by recurring requests and by applications that
+already maintain ordered sets or emulate them with dictionaries.
+
+Predictable processing
+----------------------
+
+In 2019, Larry Hastings described a collection of ready jobs that needed
+iteration, fast membership tests, and removal of jobs that became
+unready. A set provided the required operations, but its traversal order
+made otherwise identical runs execute jobs in different orders, making
+debugging harder. He replaced it with a dictionary whose values were
+``None`` and proposed preserving insertion order in built-in sets.
+[#ready-jobs]_
+
+The Mesa agent-based simulation project reported a related requirement:
+agents must occur once in a collection, support removal, and be visited
+in a predictable order. Its contributor described unordered sets as a
+source of nondeterministic runs and dictionaries as a workaround requiring
+unused values. He explicitly supported either a standard ordered-set
+type or an insertion-order guarantee for built-in sets. [#mesa]_
+
+These uses require the collection to retain an existing scheduling order.
+They do not require a comparison operation between jobs or agents.
+Sorting is therefore not a general replacement for preserving insertion
+order.
+
+Preserving user input
+---------------------
+
+The Discussions on Python.org (DPO) thread records user-generated tags
+that must remain unique while appearing in their original order on plots
+and printouts.
+It also records CSV validation that combined invalid-row indices while
+retaining an intuitive order for reporting them. [#tags]_ [#csv]_
+
+A separate 2024 request gave language preferences as an example:
+``es_AR, es_MX, es_MX, en`` should become ``es_AR, es_MX, en``.
+[#languages]_ Deduplication should preserve the first occurrence of each
+preference because rearranging preferences changes their priority.
+The same requirement applies when repeated names are collected from
+configuration entries or command-line arguments.
+
+Reproducibility and diagnostics
+-------------------------------
+
+Scientific workloads have reported needing consistent traversal between
+runs, and code generation has reported unwanted variation caused by
+iterating over sets. [#science]_ [#code-generation]_ With repeatable input,
+stable traversal can retain an order already established upstream
+instead of requiring programs to reconstruct one at each output boundary.
+
+A 2020 request to change built-in sets arose from seeded random selection.
+The program used ``random.choice(list(my_set))``; setting the random
+seed did not fix the order of the sequence from which it selected.
+[#seeded-selection]_ Preserving insertion order would remove this source
+of variation when the set is populated in a repeatable order. It would
+not make an unordered input or concurrent producer deterministic.
+
+Another report concerned content-addressed JSON data whose round trips
+needed to retain ordering. [#json]_ This is a requirement for preserving
+an existing representation. Insertion order does not by itself define a
+canonical serialization: equal sets populated in different orders may
+still produce different sequences.
+
+Existing applications
+---------------------
+
+Ordered uniqueness also appears in maintained project implementations:
+
+* AnnData defines an ordered-set helper specifically to retain key order.
+  Its merge code uses that helper while computing unions and
+  intersections of keys. [#anndata]_
+
+* pytest uses ``dict[T, None]`` as an ordered-set representation in its
+  fixture reordering algorithm. The algorithm retains unique parameter
+  keys and test items while grouping tests to reduce setup and teardown
+  of fixtures with broader scopes. [#pytest]_
+
+* SymPy uses ordered sets in common-subexpression elimination. It sorts
+  candidates by the number of matching arguments, then processes that
+  order while applying intersection, difference, and union to argument
+  collections. Its helper also provides ``pop(last=False)``, an API beyond
+  this proposal's insertion-order guarantee. [#sympy]_
+
+* PyTorch uses an ordered-set implementation for Dynamo guard state.
+  Checkpoints copy the guard collection, and comparison of checkpoints
+  computes a difference of those collections. [#pytorch]_
+
+These examples demonstrate uses of ordered uniqueness in simulation,
+data processing, testing, and compilation. They do not imply that the
+projects endorse changing the built-in type, or that their existing
+helpers could be replaced without checking their additional semantics.
 
 Specification
 =============
@@ -122,34 +209,112 @@ and equality callbacks modify the set.
 Rationale
 =========
 
-Making insertion order a property of the built-in type extends the
-guarantee to ordinary set displays and comprehensions.
-It follows the precedent of dictionaries retaining insertion order
-while comparing independently of it.
+Changing the built-in type
+--------------------------
+
+Making insertion order a property of ``set`` extends the guarantee to
+ordinary set displays, comprehensions, and existing code that constructs
+sets. Callers can use the same collection for uniqueness and predictable
+traversal without selecting a different type at each construction point.
+
+A separate type requires ordering to be preserved across every boundary
+where a collection is created or converted. Converting such a collection
+to a built-in set currently loses its ordering contract. A built-in
+guarantee makes preservation the default when code uses ``set`` and the
+operations covered by this specification.
+
+This benefit has a corresponding cost: the guarantee also applies to
+workloads that do not need order. The reference implementation must
+evaluate those workloads, including membership tests and set algebra,
+alongside applications that benefit from ordered traversal.
+
+Retaining the set interface
+---------------------------
+
+:pep:`218` justified a dedicated set interface in part because
+dictionaries with unused values did not directly provide the required
+set operations. That distinction remains relevant to ordered sets.
+Dictionary union was added by :pep:`584`, but dictionaries do not provide
+the full set API.
+
+Dictionary key views support set operations, but their results are sets
+whose traversal currently has no insertion-order guarantee. A DPO example
+demonstrates losing key order through intersection and difference, and an
+independent 2024 discussion identifies the same limitation of
+``dict.fromkeys``. [#dict-views]_ [#dict-workaround]_ Emulating the desired
+behavior therefore requires more than replacing a set constructor with
+a dictionary constructor.
+
+The proposal retains ``add``, ``discard``, membership tests, and set
+operators as the vocabulary for collections of unique elements.
+Insertion order describes how that collection is traversed; it does not
+turn the collection into a sequence.
+
+Order-independent equality
+--------------------------
 
 Membership-based equality preserves the existing set model, including
 the abstract-set relationships described in :pep:`3119`. Traversal
 order need not become part of equality to be useful to callers.
 
-The guarantee applies to all sets, including workloads that do not
-require order. Its time, memory, and algorithmic costs therefore need
-evaluation against the current implementation.
+For example, ``set(["red", "blue"])`` and ``set(["blue", "red"])``
+contain the same members and compare equal, but iteration retains each
+input's order. Programs that need to compare traversal order can compare
+the corresponding lists explicitly.
+
+This distinction also preserves the membership meaning of commutative
+operations. ``a | b`` and ``b | a`` must compare equal even if their
+result traversal orders differ. The operation-specific ordering rules
+remain to be specified; equality does not depend on those rules.
+
+Dictionaries provide a familiar precedent: their equality ignores
+insertion order even though iteration preserves it. :pep:`372` also
+provides a precedent for keeping the position of an existing entry when
+it is updated.
 
 Prior Discussion
 ================
 
-The `Add OrderedSet to stdlib discussion
-<https://discuss.python.org/t/add-orderedset-to-stdlib/12730>`__
-contains related use cases and implementation concerns, although its
-principal proposal was a separate ``collections.OrderedSet``. The thread
-also explains `why compact dictionary storage does not directly justify
-changing sets
-<https://discuss.python.org/t/add-orderedset-to-stdlib/12730/70>`__.
+Requests for ordered sets predate the insertion-order guarantee for
+built-in dictionaries. In 2009, Mart Sõmermaa proposed adding an
+``OrderedSet`` to ``collections`` and described accumulating values
+without duplicates while retaining insertion order. [#request-2009]_
+In 2015, Neil Girdhar requested an ordered set with the complete set API;
+he described starting with a set and later discovering a need for
+ordering without wanting to rewrite the set operations. [#request-2015]_
 
-:pep:`218` motivates a dedicated set interface rather than dictionaries
-with unused values. :pep:`372` provides precedent for first-insertion
-behavior. :pep:`584` adds dictionary union but leaves additional set
-operators to another proposal.
+Built-in ordering has also been proposed directly. Inada Naoki presented
+a compact ordered-set prototype in 2019, citing doctests, logs, and
+ordered deduplication. [#prototype-2019]_ Hastings's ready-job example
+followed later that year. The 2020 seeded-selection request was rejected,
+and a 2021 request for consistency between ``dict`` and ``set`` was closed
+as a duplicate. [#seeded-selection]_ [#request-2021]_
+
+The DPO discussion beginning in December 2021 principally proposed a
+separate ``collections.OrderedSet``. It supplies use cases and analysis
+of alternatives, but does not establish agreement on changing every
+built-in set. [#dpo-thread]_ Later requests include the 2024 language
+preference example and a 2025 report of repeated use of
+``dict[T, None]`` for stable traversal in hashing workflows.
+[#languages]_ [#request-2025]_
+
+The recurring technical objections concern the ordering of set-operation
+results, efficient intersection when operand sizes differ, membership
+lookup costs, and repeated deletion and insertion. Raymond Hettinger's
+responses to the 2019 prototype and the DPO proposal describe these
+requirements. [#prototype-response]_ [#raymond-dpo]_ The reference
+implementation must address these costs; the required measurements are
+listed below.
+Earlier prototypes and dictionary performance are not measurements of
+the implementation proposed here.
+
+Participants have also disagreed about which type should provide the
+feature. Bradd Szonye described extensive use of set difference and a
+need for stable diagnostics, while favoring a separate collection to
+preserve built-in set performance. Chris Angelico likewise recommended
+retaining the existing built-in type. [#separate-type]_ These positions
+support distinguishing the need for ordered uniqueness from the choice
+to guarantee it for all sets.
 
 Backwards Compatibility
 =======================
@@ -159,6 +324,24 @@ Traversal and representation order may change from the previously
 unspecified order. Algorithms that choose elements by iteration may
 consequently make different choices, and tests or diagnostics may
 produce different output.
+
+Unspecified order is not a promise of random selection. Programs that
+need randomized processing must request it explicitly. Conversely,
+programs that need a sorted or canonical order must continue to impose
+that order themselves.
+
+Equal sets can retain different insertion histories. Code must not infer
+that equal sets have equal traversal sequences. The proposal does not
+change subset comparisons into lexicographic comparisons, or require
+elements to support ordering comparisons.
+
+The language-level guarantee must be implemented by conforming Python
+implementations. Existing programs must not rely on it when running on
+Python versions that predate the change.
+
+TODO (Yury): Describe effects on the C API, subclasses, extension modules,
+and existing serialized data. Identify any compatibility changes beyond
+iteration order and the operation semantics specified above.
 
 Security Implications
 =====================
@@ -178,28 +361,181 @@ set display and comprehension, then removal and reinsertion. Explain
 that equality still compares members and that encounter order depends
 on the input's traversal order.
 
+Use ``list(set(values))`` to illustrate retaining the first occurrence of
+each value under the new guarantee. Contrast it with ``sorted(set(values))``,
+which deliberately sorts the unique values. Demonstrate that two sets
+can compare equal while their list conversions differ.
+
+Sets continue to have no positional indexing or slicing. A stable
+iteration order does not introduce integer positions into the set API.
+Documentation and migration notes should distinguish the new guarantee
+from the behavior of earlier Python versions.
+
 Reference Implementation
 ========================
 
 TODO (Yury): Add the implementation link and describe its design,
-including compiler changes needed to preserve display order.
+including compiler changes needed to preserve display order, storage of
+insertion order, deletion handling, and compaction or resizing.
 
 TODO (Yury): Add benchmarks for construction, membership, iteration,
-set algebra, and memory use. Address the questions raised in
-`Raymond Hettinger's post
-<https://discuss.python.org/t/add-orderedset-to-stdlib/12730/77>`__,
-particularly intersection with strongly unequal operand sizes and
-sustained deletion and reinsertion. Compare relevant workloads with
-the existing implementation and identify regressions.
+set algebra, and memory use. Address Raymond Hettinger's questions,
+particularly intersection with strongly unequal operand sizes in both
+argument orders, successful and unsuccessful membership tests, and
+sustained deletion and reinsertion. Include small and large collections
+and application workloads, not only tight microbenchmarks. Compare with
+the existing implementation and identify regressions. [#raymond-dpo]_
+[#prototype-response]_
+
+TODO (Yury): Provide conformance tests for the specified ordering rules,
+including equal but distinct elements, display optimizations, and the
+operation and interoperability cases listed in the specification.
 
 Rejected Alternatives
 =====================
 
-A separate ordered-set type would require callers to adopt another
-collection and leave built-in sets without the guarantee. New syntax
-is unnecessary because existing displays and comprehensions suffice.
-Indexing, slicing, and explicit reordering methods are outside the
-scope of preserving insertion order.
+A separate ordered-set type
+---------------------------
+
+A separate type would let callers opt into ordering and leave existing
+set implementations free of that requirement. It would also require
+adopting another collection, leave displays and comprehensions producing
+unordered sets, and introduce conversions at API boundaries. This PEP
+proposes a guarantee on the built-in type so ordinary set construction
+preserves insertion order.
+
+Dictionaries with unused values
+-------------------------------
+
+``dict.fromkeys`` remains a practical solution for ordered deduplication
+on existing Python versions. For mutable collections it requires mapping
+operations such as ``d[value] = None`` in place of ``add``, and additional
+code to retain order through set algebra. The workaround supplies the
+representation without supplying the complete set interface.
+
+Sorting at use sites
+--------------------
+
+Sorting is appropriate when the application wants sorted output. It
+cannot recover insertion order after that information has been lost.
+It also requires comparable elements or an application-defined key,
+neither of which is required by a hash-based set.
+
+Fixing the hash seed
+--------------------
+
+A fixed ``PYTHONHASHSEED`` does not specify insertion order. It controls
+hash randomization for supported types, rather than defining a collection
+contract. It cannot replace preserving encounter order, and applications
+should not need to control a process-wide hashing setting to retain
+their input order.
+
+Sequence features and new syntax
+--------------------------------
+
+Indexing, slicing, and explicit reordering methods are outside the scope
+of preserving insertion order. Some requests for ordered collections
+also request those features; this proposal does not satisfy that part of
+their requirements. New syntax is unnecessary because existing set
+displays and comprehensions suffice.
+
+References
+==========
+
+.. [#ready-jobs] Larry Hastings, "Should set objects maintain insertion
+   order too?", December 2019.
+   https://mail.python.org/archives/list/python-dev@python.org/thread/AEKCBGCKX23S4PMA5YNDHFJRHDL4JMKY/
+
+.. [#mesa] Ewout ter Hoeven, Mesa agent collections, December 2023.
+   https://discuss.python.org/t/add-orderedset-to-stdlib/12730/85
+   https://discuss.python.org/t/add-orderedset-to-stdlib/12730/88
+
+.. [#tags] Justin Gerber, preserving user-generated tag order, October 2022.
+   https://discuss.python.org/t/add-orderedset-to-stdlib/12730/11
+
+.. [#csv] Vladimir, CSV validation and row indices, November 2022.
+   https://discuss.python.org/t/add-orderedset-to-stdlib/12730/44
+
+.. [#languages] Franco M, first-occurrence language preferences,
+   October 2024.
+   https://discuss.python.org/t/store-set-items-in-an-orderly-manner-on-a-first-come-first-serve-basis/67911/2
+
+.. [#science] Yoni Lavi, reproducibility in scientific workloads,
+   December 2022.
+   https://discuss.python.org/t/add-orderedset-to-stdlib/12730/46
+
+.. [#code-generation] Tom Ritchford, set traversal in code generation,
+   August 2025.
+   https://discuss.python.org/t/implement-as-an-empty-set-literal/101197/56
+
+.. [#seeded-selection] Dan Gheorghe Haiduc, "Make set ordered",
+   November 2020; request and rejection.
+   https://bugs.python.org/issue42368
+
+.. [#json] Marcin Szewczyk, content-addressed JSON round trips,
+   October 2022.
+   https://discuss.python.org/t/add-orderedset-to-stdlib/12730/42
+
+.. [#anndata] AnnData, ordered keys in merge operations.
+   https://github.com/scverse/anndata/blob/1ec7ba8a9e44ee1eb9fe6756e01ee542666272f8/src/anndata/_core/merge.py#L61-L100
+
+.. [#pytest] pytest, ordered sets in fixture reordering.
+   https://github.com/pytest-dev/pytest/blob/c9bf1edf9e0d388f3e7bebc88576e608ffbc40a4/src/_pytest/fixtures.py#L197-L200
+   https://github.com/pytest-dev/pytest/blob/c9bf1edf9e0d388f3e7bebc88576e608ffbc40a4/src/_pytest/fixtures.py#L281-L334
+
+.. [#sympy] SymPy, argument tracking in common-subexpression elimination.
+   https://github.com/sympy/sympy/blob/9d8ca701f8ba75b9b3cb1e23e6dcdac6572d7e73/sympy/simplify/cse_main.py#L398-L430
+
+.. [#pytorch] PyTorch, Dynamo guard checkpoints and differences.
+   https://github.com/pytorch/pytorch/blob/1404563568be4b2d23634a409bd7a9c7972c1c5c/torch/_guards.py#L516-L536
+   https://github.com/pytorch/pytorch/blob/1404563568be4b2d23634a409bd7a9c7972c1c5c/torch/_guards.py#L741-L748
+
+.. [#dict-views] Bradd Szonye, order loss in dictionary-view operations,
+   December 2022.
+   https://discuss.python.org/t/add-orderedset-to-stdlib/12730/53
+   https://discuss.python.org/t/add-orderedset-to-stdlib/12730/55
+
+.. [#dict-workaround] Ben Hsing, the limits of ``dict.fromkeys``,
+   October 2024.
+   https://discuss.python.org/t/store-set-items-in-an-orderly-manner-on-a-first-come-first-serve-basis/67911/7
+
+.. [#request-2009] Mart Sõmermaa, "Add OrderedSet now that OrderedDict
+   is in collections", April 2009.
+   https://mail.python.org/pipermail/python-ideas/2009-April/004084.html
+
+.. [#request-2015] Neil Girdhar, ordered sets with the set API,
+   February 2015.
+   https://mail.python.org/pipermail/python-ideas/2015-February/031635.html
+   https://mail.python.org/pipermail/python-ideas/2015-February/031692.html
+
+.. [#prototype-2019] Inada Naoki, "Compact ordered set", February 2019.
+   https://mail.python.org/pipermail/python-dev/2019-February/156466.html
+
+.. [#request-2021] Michael Rans, "Make set ordered like dict",
+   September 2021; request closed as a duplicate.
+   https://bugs.python.org/issue45092
+
+.. [#dpo-thread] "Add OrderedSet to stdlib", discussion beginning in
+   December 2021.
+   https://discuss.python.org/t/add-orderedset-to-stdlib/12730
+
+.. [#request-2025] Tierry Hörmann, ordered sets and stable hashing workflows,
+   July 2025.
+   https://discuss.python.org/t/why-dict-is-insertion-ordered-but-set-is-not-insertion-ordered-weird-design/99696/8
+
+.. [#prototype-response] Raymond Hettinger, response to "Compact ordered
+   set", February 2019.
+   https://mail.python.org/pipermail/python-dev/2019-February/156475.html
+
+.. [#raymond-dpo] Raymond Hettinger, questions for an ordered-set proposal,
+   April 2023.
+   https://discuss.python.org/t/add-orderedset-to-stdlib/12730/77
+
+.. [#separate-type] Chris Angelico and Bradd Szonye, preference for retaining
+   the built-in type and using other collections for ordering,
+   December 2022.
+   https://discuss.python.org/t/add-orderedset-to-stdlib/12730/49
+   https://discuss.python.org/t/add-orderedset-to-stdlib/12730/50
 
 Copyright
 =========
