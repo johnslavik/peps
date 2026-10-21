@@ -1,0 +1,208 @@
+PEP: 9999
+Title: Preserve insertion order in set
+Author: Yury Selivanov, Bartosz Sławecki
+Discussions-To: Pending
+Status: Draft
+Type: Standards Track
+Created: 21-Oct-2026
+Post-History: Pending
+
+..
+   TODO: Replace provisional PEP number and add target release.
+
+Abstract
+========
+
+This PEP proposes guaranteeing insertion order for the built-in ``set``
+type. Iteration visits surviving elements in their first-insertion
+order. Adding an existing member preserves its position; removing and
+reinserting it places it last. Equality and membership relationships
+remain independent of order. Existing set syntax and APIs are retained.
+
+Motivation
+==========
+
+Programs use sets to express uniqueness and set algebra, but often also
+need predictable traversal. Examples include processing configuration
+entries in input order, comparing diagnostic output between runs, and
+generating code reproducibly.
+
+A dependency collection illustrates the requirement: repeated names
+should collapse, while processing follows their first appearance::
+
+    names = set(["parser", "runtime", "parser", "tests"])
+    list(names)
+    # ['parser', 'runtime', 'tests']
+
+Today, ``dict.fromkeys`` preserves this order but exposes a mapping
+interface for elements without associated values. Sorting imposes a
+different order and requires comparable elements or a suitable key.
+Guaranteeing insertion order lets programs retain encounter order while
+using the set interface.
+
+Reported applications include `reproducible scientific workloads
+<https://discuss.python.org/t/add-orderedset-to-stdlib/12730/46>`__,
+`content-addressed JSON round trips
+<https://discuss.python.org/t/add-orderedset-to-stdlib/12730/42>`__,
+and `code generation affected by nondeterministic set traversal
+<https://discuss.python.org/t/implement-as-an-empty-set-literal/101197/56>`__.
+
+Specification
+=============
+
+Construction and iteration
+--------------------------
+
+``set()`` constructs an empty set. ``set(iterable)`` inserts elements
+in the iterable's traversal order, retaining the first occurrence of
+each equal member. Iteration visits surviving entries in insertion
+order.
+
+Set displays insert elements in their existing left-to-right evaluation
+order. Set comprehensions insert results as their iteration produces
+them::
+
+    list({"red", "blue", "red"})
+    # ['red', 'blue']
+    list({word.lower() for word in ["RED", "BLUE", "red"]})
+    # ['red', 'blue']
+
+Display unpacking uses the unpacked iterable's traversal order.
+Constructing from a source with unspecified order preserves the observed
+traversal; it does not establish a deterministic order for that source.
+
+Compiler optimizations must preserve encounter order. In particular,
+constructing a constant set display through a frozen constant must not
+lose source order during compilation or constant folding.
+
+Mutation and representatives
+----------------------------
+
+Adding an existing member preserves its position and stored
+representative. Equal objects occupy one entry even when their
+identities differ: ``set([1, True])`` retains the integer ``1``.
+
+``update`` appends new members in encounter order, processing iterable
+arguments from left to right. Existing members retain their positions.
+Removing an element preserves the relative order of survivors;
+reinserting it appends it::
+
+    values = {"red", "blue"}
+    values.add("red")
+    list(values)
+    # ['red', 'blue']
+    values.remove("red")
+    values.add("red")
+    list(values)
+    # ['blue', 'red']
+
+Membership, element hashability requirements, equality, and tests for
+subsets, supersets, and disjoint sets retain their existing semantics.
+In particular, ``{"red", "blue"} == {"blue", "red"}`` remains true.
+Mutable sets remain unhashable.
+
+Remaining operation semantics
+-----------------------------
+
+TODO (Yury): Specify result order and representative selection for union,
+intersection, difference, and symmetric difference. Cover named methods,
+multiple operands, reflected dispatch, in-place forms, repeated elements
+in iterable operands, and aliases including a set operated on itself.
+
+TODO (Yury): Specify which element ``pop`` removes.
+
+TODO (Yury): Determine the ordering guarantee for ``frozenset`` and
+operations mixing mutable sets, immutable sets, dictionary views, and
+foreign set implementations.
+
+TODO (Yury): Specify order preservation for copies and serialization
+round trips, and behavior during iteration when mutations or hashing
+and equality callbacks modify the set.
+
+Rationale
+=========
+
+Making insertion order a property of the built-in type extends the
+guarantee to ordinary set displays and comprehensions.
+It follows the precedent of dictionaries retaining insertion order
+while comparing independently of it.
+
+Membership-based equality preserves the existing set model, including
+the abstract-set relationships described in :pep:`3119`. Traversal
+order need not become part of equality to be useful to callers.
+
+The guarantee applies to all sets, including workloads that do not
+require order. Its time, memory, and algorithmic costs therefore need
+evaluation against the current implementation.
+
+Prior Discussion
+================
+
+The `Add OrderedSet to stdlib discussion
+<https://discuss.python.org/t/add-orderedset-to-stdlib/12730>`__
+contains related use cases and implementation concerns, although its
+principal proposal was a separate ``collections.OrderedSet``. The thread
+also explains `why compact dictionary storage does not directly justify
+changing sets
+<https://discuss.python.org/t/add-orderedset-to-stdlib/12730/70>`__.
+
+:pep:`218` motivates a dedicated set interface rather than dictionaries
+with unused values. :pep:`372` provides precedent for first-insertion
+behavior. :pep:`584` adds dictionary union but leaves additional set
+operators to another proposal.
+
+Backwards Compatibility
+=======================
+
+Set syntax, APIs, membership, and comparison semantics are preserved.
+Traversal and representation order may change from the previously
+unspecified order. Algorithms that choose elements by iteration may
+consequently make different choices, and tests or diagnostics may
+produce different output.
+
+Security Implications
+=====================
+
+Hash randomization and protection against collision attacks remain
+necessary independently of predictable iteration order.
+
+TODO (Yury): Document security effects of the implementation, including
+collision resistance and reentrant hashing and equality callbacks.
+
+How to Teach This
+=================
+
+Teach sets as collections of unique, hashable elements that remember
+first insertion for iteration. Demonstrate duplicate removal with a
+set display and comprehension, then removal and reinsertion. Explain
+that equality still compares members and that encounter order depends
+on the input's traversal order.
+
+Reference Implementation
+========================
+
+TODO (Yury): Add the implementation link and describe its design,
+including compiler changes needed to preserve display order.
+
+TODO (Yury): Add benchmarks for construction, membership, iteration,
+set algebra, and memory use. Address the questions raised in
+`Raymond Hettinger's post
+<https://discuss.python.org/t/add-orderedset-to-stdlib/12730/77>`__,
+particularly intersection with strongly unequal operand sizes and
+sustained deletion and reinsertion. Compare relevant workloads with
+the existing implementation and identify regressions.
+
+Rejected Alternatives
+=====================
+
+A separate ordered-set type would require callers to adopt another
+collection and leave built-in sets without the guarantee. New syntax
+is unnecessary because existing displays and comprehensions suffice.
+Indexing, slicing, and explicit reordering methods are outside the
+scope of preserving insertion order.
+
+Copyright
+=========
+
+This document is placed in the public domain or under the
+CC0-1.0-Universal license, whichever is more permissive.
