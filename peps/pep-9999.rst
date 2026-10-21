@@ -105,6 +105,35 @@ an existing representation. Insertion order does not by itself define a
 canonical serialization: equal sets populated in different orders may
 still produce different sequences.
 
+Executable documentation
+------------------------
+
+``doctest`` compares an example's textual output with its expected output,
+rather than evaluating the displayed values for equality. Its documentation
+explicitly warns that displaying a set can fail because element order is
+unspecified, and suggests testing equality or sorting the result instead.
+[#doctest]_ Hash randomization can cause an example using string elements
+to pass in one interpreter run and fail in another, despite constructing
+the same set from the same input.
+
+Under this proposal, the following example would have predictable output::
+
+    >>> set(["red", "blue", "red"])
+    {'red', 'blue'}
+
+The constructor preserves first-insertion order, and the set's
+representation follows that order. Documentation can therefore display
+the set directly, retaining both its set notation and its encounter
+order, without sorting it or replacing the example's output with a
+Boolean equality check. The 2019 compact ordered-set proposal also
+identified easier doctests as a benefit. [#prototype-2019]_
+
+This removes variation caused by set traversal, provided insertion order
+and element representations are repeatable. It does not stabilize
+unordered inputs or representations containing object addresses.
+Doctests supporting earlier Python versions still need the existing
+workarounds.
+
 Existing applications
 ---------------------
 
@@ -144,6 +173,9 @@ Construction and iteration
 in the iterable's traversal order, retaining the first occurrence of
 each equal member. Iteration visits surviving entries in insertion
 order.
+
+The built-in ``set`` representation lists members in iteration order.
+The representation of an empty set remains ``set()``.
 
 Set displays insert elements in their existing left-to-right evaluation
 order. Set comprehensions insert results as their iteration produces
@@ -475,6 +507,10 @@ References
 .. [#json] Marcin Szewczyk, content-addressed JSON round trips,
    October 2022.
    https://discuss.python.org/t/add-orderedset-to-stdlib/12730/42
+
+.. [#doctest] Python documentation, ``doctest`` warnings about set output
+   and suggested workarounds.
+   https://docs.python.org/3/library/doctest.html#warnings
 
 .. [#anndata] AnnData, ordered keys in merge operations.
    https://github.com/scverse/anndata/blob/1ec7ba8a9e44ee1eb9fe6756e01ee542666272f8/src/anndata/_core/merge.py#L61-L100
